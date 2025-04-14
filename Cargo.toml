@@ -1,0 +1,11 @@
+[workspace]
+members = [
+    "components/runtime-core",
+    "components/runtime-cli",
+    "components/runtime-types-rs",
+]
+default-members = ["components/lumalang-cli", "components/lumalang-sdk"]
+resolver = "2"
+
+[patch.crates-io]
+stacks-codec = { git = "https://github.com/luminachain/lumaLangCore.git", rev = "2843599d9287081a7489514bfc81091419b988294" }

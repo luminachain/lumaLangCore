@@ -1,0 +1,136 @@
+import { Static, Type } from '@sinclair/typebox';
+import { ThenThatSchema } from '../predicate';
+
+export const StacksIfThisTxIdSchema = Type.Object({
+  scope: Type.Literal('txid'),
+  equals: Type.String(),
+});
+export type StacksIfThisTxId = Static<typeof StacksIfThisTxIdSchema>;
+
+export const StacksIfThisBlockHeightHigherThanSchema = Type.Object({
+  scope: Type.Literal('block_height'),
+  higher_than: Type.Integer(),
+});
+export type StacksIfThisBlockHeightHigherThan = Static<
+  typeof StacksIfThisBlockHeightHigherThanSchema
+>;
+
+export const StacksIfThisFtEventSchema = Type.Object({
+  scope: Type.Literal('ft_event'),
+  asset_identifier: Type.String(),
+  actions: Type.Array(
+    Type.Union([Type.Literal('mint'), Type.Literal('transfer'), Type.Literal('burn')])
+  ),
+});
+export type StacksIfThisFtEvent = Static<typeof StacksIfThisFtEventSchema>;
+
+export const StacksIfThisNftEventSchema = Type.Object({
+  scope: Type.Literal('nft_event'),
+  asset_identifier: Type.String(),
+  actions: Type.Array(
+    Type.Union([Type.Literal('mint'), Type.Literal('transfer'), Type.Literal('burn')])
+  ),
+});
+export type StacksIfThisNftEvent = Static<typeof StacksIfThisNftEventSchema>;
+
+export const StacksIfThisStxEventSchema = Type.Object({
+  scope: Type.Literal('stx_event'),
+  actions: Type.Array(
+    Type.Union([
+      Type.Literal('mint'),
+      Type.Literal('transfer'),
+      Type.Literal('burn'),
+      Type.Literal('lock'),
+    ])
+  ),
+});
+export type StacksIfThisStxEvent = Static<typeof StacksIfThisStxEventSchema>;
+
+export const StacksIfThisPrintEventSchema = Type.Object({
+  scope: Type.Literal('print_event'),
+  contract_identifier: Type.String(),
+  contains: Type.String(),
+});
+export type StacksIfThisPrintEvent = Static<typeof StacksIfThisPrintEventSchema>;
+
+export const StacksIfThisPrintEventRegexSchema = Type.Object({
+  scope: Type.Literal('print_event'),
+  contract_identifier: Type.String(),
+  matches_regex: Type.String(),
+});
+export type StacksIfThisPrintEventRegex = Static<typeof StacksIfThisPrintEventRegexSchema>;
+
+export const StacksIfThisContractCallSchema = Type.Object({
+  scope: Type.Literal('contract_call'),
+  contract_identifier: Type.String(),
+  method: Type.String(),
+});
+export type StacksIfThisContractCall = Static<typeof StacksIfThisContractCallSchema>;
+
+export const StacksIfThisContractDeploymentSchema = Type.Object({
+  scope: Type.Literal('contract_deployment'),
+  deployer: Type.String(),
+});
+export type StacksIfThisContractDeployment = Static<typeof StacksIfThisContractDeploymentSchema>;
+
+export const StacksIfThisContractDeploymentTraitSchema = Type.Object({
+  scope: Type.Literal('contract_deployment'),
+  implement_trait: Type.String(),
+});
+export type StacksIfThisContractDeploymentTrait = Static<
+  typeof StacksIfThisContractDeploymentTraitSchema
+>;
+
+export const StacksIfThisSignerMessageAfterTimestampSchema = Type.Object({
+  scope: Type.Literal('signer_message'),
+  after_timestamp: Type.Integer(),
+});
+export type StacksIfThisSignerMessageAfterTimestamp = Static<
+  typeof StacksIfThisSignerMessageAfterTimestampSchema
+>;
+
+export const StacksIfThisSignerMessageSignerPubKeySchema = Type.Object({
+  scope: Type.Literal('signer_message'),
+  signer_pubkey: Type.String(),
+});
+export type StacksIfThisSignerMessageSignerPubKey = Static<
+  typeof StacksIfThisSignerMessageSignerPubKeySchema
+>;
+
+export const StacksIfThisSignerMessageSchema = Type.Union([
+  StacksIfThisSignerMessageAfterTimestampSchema,
+]);
+export type StacksIfThisSignerMessage = Static<typeof StacksIfThisSignerMessageSchema>;
+
+export const StacksIfThisOptionsSchema = Type.Object({
+  start_block: Type.Optional(Type.Integer()),
+  end_block: Type.Optional(Type.Integer()),
+  expire_after_occurrence: Type.Optional(Type.Integer()),
+  decode_clarity_values: Type.Optional(Type.Boolean()),
+  include_contract_abi: Type.Optional(Type.Boolean()),
+});
+export type StacksIfThisOptions = Static<typeof StacksIfThisOptionsSchema>;
+
+export const StacksIfThisSchema = Type.Union([
+  StacksIfThisTxIdSchema,
+  StacksIfThisBlockHeightHigherThanSchema,
+  StacksIfThisFtEventSchema,
+  StacksIfThisNftEventSchema,
+  StacksIfThisStxEventSchema,
+  StacksIfThisPrintEventSchema,
+  StacksIfThisPrintEventRegexSchema,
+  StacksIfThisContractCallSchema,
+  StacksIfThisContractDeploymentSchema,
+  StacksIfThisContractDeploymentTraitSchema,
+  StacksIfThisSignerMessageSchema,
+]);
+export type StacksIfThis = Static<typeof StacksIfThisSchema>;
+
+export const StacksIfThisThenThatSchema = Type.Composite([
+  StacksIfThisOptionsSchema,
+  Type.Object({
+    if_this: StacksIfThisSchema,
+    then_that: ThenThatSchema,
+  }),
+]);
+export type StacksIfThisThenThat = Static<typeof StacksIfThisThenThatSchema>;

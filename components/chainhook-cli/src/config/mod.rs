@@ -1,0 +1,496 @@
+pub mod file;
+pub mod generator;
+
+use lumalanghook_sdk::lumalanghooks::types::{LumalanghookStore, PoxConfig};
+pub use lumalanghook_sdk::indexer::IndexerConfig;
+use lumalanghook_sdk::observer::{EventObserverConfig, PredicatesConfig};
+use lumalanghook_sdk::types::{
+    BitcoinBlockSignaling, BitcoinNetwork, StacksNetwork, StacksNodeConfig,
+};
+pub use file::ConfigFile;
+use std::fs::File;
+use std::io::{BufReader, Read};
+use std::path::PathBuf;
+
+const DEFAULT_MAINNET_STACKS_TSV_ARCHIVE: &str =
+    "https://archive.hiro.so/mainnet/stacks-blockchain-api/mainnet-stacks-blockchain-api-latest";
+const DEFAULT_TESTNET_STACKS_TSV_ARCHIVE: &str =
+    "https://archive.hiro.so/testnet/stacks-blockchain-api/testnet-stacks-blockchain-api-latest";
+pub const DEFAULT_REDIS_URI: &str = "redis://localhost:6379/";
+
+pub const DEFAULT_INGESTION_PORT: u16 = 20455;
+pub const DEFAULT_CONTROL_PORT: u16 = 20456;
+pub const STACKS_SCAN_THREAD_POOL_SIZE: usize = 10;
+pub const BITCOIN_SCAN_THREAD_POOL_SIZE: usize = 10;
+pub const STACKS_MAX_PREDICATE_REGISTRATION: usize = 50;
+pub const BITCOIN_MAX_PREDICATE_REGISTRATION: usize = 50;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Config {
+    pub storage: StorageConfig,
+    pub pox_config: PoxConfig,
+    pub http_api: PredicatesApi,
+    pub predicates: PredicatesConfig,
+    pub event_sources: Vec<EventSourceConfig>,
+    pub limits: LimitsConfig,
+    pub network: IndexerConfig,
+    pub monitoring: MonitoringConfig,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StorageConfig {
+    pub working_dir: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PredicatesApi {
+    Off,
+    On(PredicatesApiConfig),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PredicatesApiConfig {
+    pub http_port: u16,
+    pub database_uri: String,
+    pub display_logs: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EventSourceConfig {
+    StacksTsvPath(PathConfig),
+    StacksTsvUrl(UrlConfig),
+    OrdinalsSqlitePath(PathConfig),
+    OrdinalsSqliteUrl(UrlConfig),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PathConfig {
+    pub file_path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UrlConfig {
+    pub file_url: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LimitsConfig {
+    pub max_number_of_bitcoin_predicates: usize,
+    pub max_number_of_concurrent_bitcoin_scans: usize,
+    pub max_number_of_stacks_predicates: usize,
+    pub max_number_of_concurrent_stacks_scans: usize,
+    pub max_number_of_processing_threads: usize,
+    pub max_number_of_networking_threads: usize,
+    pub max_caching_memory_size_mb: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MonitoringConfig {
+    pub prometheus_monitoring_port: Option<u16>,
+}
+impl Config {
+    pub fn from_file_path(file_path: &str) -> Result<Config, String> {
+        let file = File::open(file_path)
+            .map_err(|e| format!("unable to read file {}\n{:?}", file_path, e))?;
+        let mut file_reader = BufReader::new(file);
+        let mut file_buffer = vec![];
+        file_reader
+            .read_to_end(&mut file_buffer)
+            .map_err(|e| format!("unable to read file {}\n{:?}", file_path, e))?;
+
+        let config_file: ConfigFile = match toml::from_slice(&file_buffer) {
+            Ok(s) => s,
+            Err(e) => {
+                return Err(format!("Config file malformatted {}", e));
+            }
+        };
+        Config::from_config_file(config_file)
+    }
+
+    pub fn is_http_api_enabled(&self) -> bool {
+        match self.http_api {
+            PredicatesApi::Off => false,
+            PredicatesApi::On(_) => true,
+        }
+    }
+
+    pub fn get_event_observer_config(&self) -> EventObserverConfig {
+        EventObserverConfig {
+            bitcoin_rpc_proxy_enabled: true,
+            registered_lumalanghooks: LumalanghookStore::new(),
+            predicates_config: PredicatesConfig {
+                payload_http_request_timeout_ms: self.predicates.payload_http_request_timeout_ms,
+            },
+            bitcoind_rpc_username: self.network.bitcoind_rpc_username.clone(),
+            bitcoind_rpc_password: self.network.bitcoind_rpc_password.clone(),
+            bitcoind_rpc_url: self.network.bitcoind_rpc_url.clone(),
+            bitcoin_block_signaling: self.network.bitcoin_block_signaling.clone(),
+            display_stacks_ingestion_logs: false,
+            bitcoin_network: self.network.bitcoin_network.clone(),
+            stacks_network: self.network.stacks_network.clone(),
+            prometheus_monitoring_port: self.monitoring.prometheus_monitoring_port,
+        }
+    }
+
+    pub fn from_config_file(config_file: ConfigFile) -> Result<Config, String> {
+        let (stacks_network, bitcoin_network) = match config_file.network.mode.as_str() {
+            "devnet" => (StacksNetwork::Devnet, BitcoinNetwork::Regtest),
+            "testnet" => (StacksNetwork::Testnet, BitcoinNetwork::Testnet),
+            "mainnet" => (StacksNetwork::Mainnet, BitcoinNetwork::Mainnet),
+            _ => return Err("network.mode not supported".to_string()),
+        };
+
+        let mut event_sources = vec![];
+        for source in config_file.event_source.unwrap_or_default().iter_mut() {
+            if let Some(dst) = source.tsv_file_path.take() {
+                let mut file_path = PathBuf::new();
+                file_path.push(dst);
+                event_sources.push(EventSourceConfig::StacksTsvPath(PathConfig { file_path }));
+                continue;
+            }
+            if let Some(file_url) = source.tsv_file_url.take() {
+                event_sources.push(EventSourceConfig::StacksTsvUrl(UrlConfig { file_url }));
+                continue;
+            }
+        }
+        let prometheus_monitoring_port = if let Some(monitoring) = config_file.monitoring {
+            monitoring.prometheus_monitoring_port
+        } else {
+            None
+        };
+        let default_pox_config = match stacks_network {
+            StacksNetwork::Mainnet => PoxConfig::mainnet_default(),
+            StacksNetwork::Devnet => PoxConfig::testnet_default(),
+            _ => PoxConfig::default(),
+        };
+        let config = Config {
+            storage: StorageConfig {
+                working_dir: config_file.storage.working_dir.unwrap_or("cache".into()),
+            },
+            pox_config: match config_file.pox_config {
+                None => default_pox_config,
+                Some(pox_config) => PoxConfig {
+                    first_burnchain_block_height: pox_config
+                        .first_burnchain_block_height
+                        .unwrap_or(default_pox_config.first_burnchain_block_height),
+                    prepare_phase_len: pox_config
+                        .prepare_phase_len
+                        .unwrap_or(default_pox_config.prepare_phase_len),
+                    reward_phase_len: pox_config
+                        .reward_phase_len
+                        .unwrap_or(default_pox_config.reward_phase_len),
+                    rewarded_addresses_per_block: pox_config
+                        .rewarded_addresses_per_block
+                        .unwrap_or(default_pox_config.rewarded_addresses_per_block),
+                },
+            },
+            http_api: match config_file.http_api {
+                None => PredicatesApi::Off,
+                Some(http_api) => match http_api.disabled {
+                    Some(true) => PredicatesApi::Off,
+                    _ => PredicatesApi::On(PredicatesApiConfig {
+                        http_port: http_api.http_port.unwrap_or(DEFAULT_CONTROL_PORT),
+                        display_logs: http_api.display_logs.unwrap_or(true),
+                        database_uri: http_api
+                            .database_uri
+                            .unwrap_or(DEFAULT_REDIS_URI.to_string()),
+                    }),
+                },
+            },
+            predicates: match config_file.predicates {
+                None => PredicatesConfig {
+                    payload_http_request_timeout_ms: None,
+                },
+                Some(predicates) => PredicatesConfig {
+                    payload_http_request_timeout_ms: predicates.payload_http_request_timeout_ms,
+                },
+            },
+            event_sources,
+            limits: LimitsConfig {
+                max_number_of_stacks_predicates: config_file
+                    .limits
+                    .max_number_of_stacks_predicates
+                    .unwrap_or(STACKS_MAX_PREDICATE_REGISTRATION),
+                max_number_of_bitcoin_predicates: config_file
+                    .limits
+                    .max_number_of_bitcoin_predicates
+                    .unwrap_or(BITCOIN_MAX_PREDICATE_REGISTRATION),
+                max_number_of_concurrent_stacks_scans: config_file
+                    .limits
+                    .max_number_of_concurrent_stacks_scans
+                    .unwrap_or(STACKS_SCAN_THREAD_POOL_SIZE),
+                max_number_of_concurrent_bitcoin_scans: config_file
+                    .limits
+                    .max_number_of_concurrent_bitcoin_scans
+                    .unwrap_or(BITCOIN_SCAN_THREAD_POOL_SIZE),
+                max_number_of_processing_threads: config_file
+                    .limits
+                    .max_number_of_processing_threads
+                    .unwrap_or(1.max(num_cpus::get().saturating_sub(1))),
+                max_number_of_networking_threads: config_file
+                    .limits
+                    .max_number_of_networking_threads
+                    .unwrap_or(1.max(num_cpus::get().saturating_sub(1))),
+                max_caching_memory_size_mb: config_file
+                    .limits
+                    .max_caching_memory_size_mb
+                    .unwrap_or(2048),
+            },
+            network: IndexerConfig {
+                bitcoind_rpc_url: config_file.network.bitcoind_rpc_url.to_string(),
+                bitcoind_rpc_username: config_file.network.bitcoind_rpc_username.to_string(),
+                bitcoind_rpc_password: config_file.network.bitcoind_rpc_password.to_string(),
+                bitcoin_block_signaling: match config_file.network.bitcoind_zmq_url {
+                    Some(ref zmq_url) => BitcoinBlockSignaling::ZeroMQ(zmq_url.clone()),
+                    None => BitcoinBlockSignaling::Stacks(StacksNodeConfig::default_localhost(
+                        config_file
+                            .network
+                            .stacks_events_ingestion_port
+                            .unwrap_or(DEFAULT_INGESTION_PORT),
+                    )),
+                },
+                stacks_network,
+                bitcoin_network,
+            },
+            monitoring: MonitoringConfig {
+                prometheus_monitoring_port,
+            },
+        };
+        Ok(config)
+    }
+
+    pub fn is_initial_ingestion_required(&self) -> bool {
+        for source in self.event_sources.iter() {
+            match source {
+                EventSourceConfig::StacksTsvUrl(_) | EventSourceConfig::StacksTsvPath(_) => {
+                    return true
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    pub fn add_local_stacks_tsv_source(&mut self, file_path: &PathBuf) {
+        self.event_sources
+            .push(EventSourceConfig::StacksTsvPath(PathConfig {
+                file_path: file_path.clone(),
+            }));
+    }
+
+    pub fn expected_api_database_uri(&self) -> &str {
+        &self.expected_api_config().database_uri
+    }
+
+    pub fn expected_api_config(&self) -> &PredicatesApiConfig {
+        match self.http_api {
+            PredicatesApi::On(ref config) => config,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn expected_local_stacks_tsv_file(&self) -> Result<&PathBuf, String> {
+        for source in self.event_sources.iter() {
+            if let EventSourceConfig::StacksTsvPath(config) = source {
+                return Ok(&config.file_path);
+            }
+        }
+        Err("could not find expected local tsv source")?
+    }
+
+    pub fn expected_cache_path(&self) -> PathBuf {
+        let mut destination_path = PathBuf::new();
+        destination_path.push(&self.storage.working_dir);
+        destination_path
+    }
+
+    pub fn is_cache_path_empty(&self) -> Result<bool, String> {
+        let mut dir = match std::fs::read_dir(self.expected_cache_path()) {
+            Ok(dir) => dir,
+            Err(error) => match error.kind() {
+                std::io::ErrorKind::NotFound => return Ok(true),
+                _ => return Err(format!("unable to read cache directory: {error}"))
+            },
+        };
+        Ok(dir.next().is_none())
+    }
+
+    fn expected_remote_stacks_tsv_base_url(&self) -> Result<&String, String> {
+        for source in self.event_sources.iter() {
+            if let EventSourceConfig::StacksTsvUrl(config) = source {
+                return Ok(&config.file_url);
+            }
+        }
+        Err("could not find expected remote tsv source")?
+    }
+
+    pub fn expected_remote_stacks_tsv_sha256(&self) -> Result<String, String> {
+        self.expected_remote_stacks_tsv_base_url()
+            .map(|url| format!("{}.sha256", url))
+    }
+
+    pub fn expected_remote_stacks_tsv_url(&self) -> Result<String, String> {
+        self.expected_remote_stacks_tsv_base_url()
+            .map(|url| format!("{}.gz", url))
+    }
+
+    pub fn contains_remote_stacks_tsv_url(&self) -> bool {
+        for source in self.event_sources.iter() {
+            if let EventSourceConfig::StacksTsvUrl(_config) = source {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn should_download_remote_stacks_tsv(&self) -> bool {
+        let mut rely_on_remote_tsv = false;
+        let mut remote_tsv_present_locally = false;
+        for source in self.event_sources.iter() {
+            if let EventSourceConfig::StacksTsvUrl(_config) = source {
+                rely_on_remote_tsv = true;
+            }
+            if let EventSourceConfig::StacksTsvPath(_config) = source {
+                remote_tsv_present_locally = true;
+            }
+        }
+        rely_on_remote_tsv && !remote_tsv_present_locally
+    }
+
+    pub fn default(
+        devnet: bool,
+        testnet: bool,
+        mainnet: bool,
+        config_path: &Option<String>,
+    ) -> Result<Config, String> {
+        let config = match (devnet, testnet, mainnet, config_path) {
+            (true, false, false, _) => Config::devnet_default(),
+            (false, true, false, _) => Config::testnet_default(),
+            (false, false, true, _) => Config::mainnet_default(),
+            (false, false, false, Some(config_path)) => Config::from_file_path(config_path)?,
+            _ => Err("Invalid combination of arguments".to_string())?,
+        };
+        Ok(config)
+    }
+
+    pub fn devnet_default() -> Config {
+        Config {
+            storage: StorageConfig {
+                working_dir: default_cache_path(),
+            },
+            pox_config: PoxConfig::devnet_default(),
+            http_api: PredicatesApi::Off,
+            predicates: PredicatesConfig {
+                payload_http_request_timeout_ms: None,
+            },
+            event_sources: vec![],
+            limits: LimitsConfig {
+                max_number_of_bitcoin_predicates: BITCOIN_MAX_PREDICATE_REGISTRATION,
+                max_number_of_concurrent_bitcoin_scans: BITCOIN_SCAN_THREAD_POOL_SIZE,
+                max_number_of_stacks_predicates: STACKS_MAX_PREDICATE_REGISTRATION,
+                max_number_of_concurrent_stacks_scans: STACKS_SCAN_THREAD_POOL_SIZE,
+                max_number_of_processing_threads: 1.max(num_cpus::get().saturating_sub(1)),
+                max_number_of_networking_threads: 1.max(num_cpus::get().saturating_sub(1)),
+                max_caching_memory_size_mb: 2048,
+            },
+            network: IndexerConfig {
+                bitcoind_rpc_url: "http://0.0.0.0:18443".into(),
+                bitcoind_rpc_username: "devnet".into(),
+                bitcoind_rpc_password: "devnet".into(),
+                bitcoin_block_signaling: BitcoinBlockSignaling::Stacks(
+                    StacksNodeConfig::default_localhost(DEFAULT_INGESTION_PORT),
+                ),
+                stacks_network: StacksNetwork::Devnet,
+                bitcoin_network: BitcoinNetwork::Regtest,
+            },
+            monitoring: MonitoringConfig {
+                prometheus_monitoring_port: None,
+            },
+        }
+    }
+
+    pub fn testnet_default() -> Config {
+        Config {
+            storage: StorageConfig {
+                working_dir: default_cache_path(),
+            },
+            pox_config: PoxConfig::testnet_default(),
+            http_api: PredicatesApi::Off,
+            predicates: PredicatesConfig {
+                payload_http_request_timeout_ms: None,
+            },
+            event_sources: vec![EventSourceConfig::StacksTsvUrl(UrlConfig {
+                file_url: DEFAULT_TESTNET_STACKS_TSV_ARCHIVE.into(),
+            })],
+            limits: LimitsConfig {
+                max_number_of_bitcoin_predicates: BITCOIN_MAX_PREDICATE_REGISTRATION,
+                max_number_of_concurrent_bitcoin_scans: BITCOIN_SCAN_THREAD_POOL_SIZE,
+                max_number_of_stacks_predicates: STACKS_MAX_PREDICATE_REGISTRATION,
+                max_number_of_concurrent_stacks_scans: STACKS_SCAN_THREAD_POOL_SIZE,
+                max_number_of_processing_threads: 1.max(num_cpus::get().saturating_sub(1)),
+                max_number_of_networking_threads: 1.max(num_cpus::get().saturating_sub(1)),
+                max_caching_memory_size_mb: 2048,
+            },
+            network: IndexerConfig {
+                bitcoind_rpc_url: "http://0.0.0.0:18332".into(),
+                bitcoind_rpc_username: "devnet".into(),
+                bitcoind_rpc_password: "devnet".into(),
+                bitcoin_block_signaling: BitcoinBlockSignaling::Stacks(
+                    StacksNodeConfig::default_localhost(DEFAULT_INGESTION_PORT),
+                ),
+                stacks_network: StacksNetwork::Testnet,
+                bitcoin_network: BitcoinNetwork::Testnet,
+            },
+            monitoring: MonitoringConfig {
+                prometheus_monitoring_port: None,
+            },
+        }
+    }
+
+    pub fn mainnet_default() -> Config {
+        Config {
+            storage: StorageConfig {
+                working_dir: default_cache_path(),
+            },
+            pox_config: PoxConfig::mainnet_default(),
+            http_api: PredicatesApi::Off,
+            predicates: PredicatesConfig {
+                payload_http_request_timeout_ms: None,
+            },
+            event_sources: vec![EventSourceConfig::StacksTsvUrl(UrlConfig {
+                file_url: DEFAULT_MAINNET_STACKS_TSV_ARCHIVE.into(),
+            })],
+            limits: LimitsConfig {
+                max_number_of_bitcoin_predicates: BITCOIN_MAX_PREDICATE_REGISTRATION,
+                max_number_of_concurrent_bitcoin_scans: BITCOIN_SCAN_THREAD_POOL_SIZE,
+                max_number_of_stacks_predicates: STACKS_MAX_PREDICATE_REGISTRATION,
+                max_number_of_concurrent_stacks_scans: STACKS_SCAN_THREAD_POOL_SIZE,
+                max_number_of_processing_threads: 1.max(num_cpus::get().saturating_sub(1)),
+                max_number_of_networking_threads: 1.max(num_cpus::get().saturating_sub(1)),
+                max_caching_memory_size_mb: 2048,
+            },
+            network: IndexerConfig {
+                bitcoind_rpc_url: "http://0.0.0.0:8332".into(),
+                bitcoind_rpc_username: "devnet".into(),
+                bitcoind_rpc_password: "devnet".into(),
+                bitcoin_block_signaling: BitcoinBlockSignaling::Stacks(
+                    StacksNodeConfig::default_localhost(DEFAULT_INGESTION_PORT),
+                ),
+                stacks_network: StacksNetwork::Mainnet,
+                bitcoin_network: BitcoinNetwork::Mainnet,
+            },
+            monitoring: MonitoringConfig {
+                prometheus_monitoring_port: None,
+            },
+        }
+    }
+}
+
+pub fn default_cache_path() -> String {
+    let mut cache_path = std::env::current_dir().expect("unable to get current dir");
+    cache_path.push("cache");
+    format!("{}", cache_path.display())
+}
+
+#[cfg(test)]
+pub mod tests;
